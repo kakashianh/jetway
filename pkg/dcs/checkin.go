@@ -157,7 +157,17 @@ func (s *Station) accept(f *Flight, targets []*Passenger, req AcceptRequest) (*A
 	} else {
 		for _, comp := range comps {
 			group := byComp[comp]
-			assigned, err := f.Cabin.Assign(comp, len(group))
+			// An infant travels on an adult's lap and takes no seat. A
+			// party of 2 adults and an infant needs 2 seats, which is
+			// what it was sold. Seated as 3, a full cabin had no seat for
+			// the last passenger it had sold one to.
+			var seated []*Passenger
+			for _, p := range group {
+				if p.Type != PaxInfant {
+					seated = append(seated, p)
+				}
+			}
+			assigned, err := f.Cabin.Assign(comp, len(seated))
 			if err == ErrNoSeat && f.State == StateOpen && confirmed(group) {
 				for _, p := range group {
 					waits[p.ID] = true
@@ -167,7 +177,7 @@ func (s *Station) accept(f *Flight, targets []*Passenger, req AcceptRequest) (*A
 			if err != nil {
 				return nil, err
 			}
-			for i, p := range group {
+			for i, p := range seated {
 				seats[p.ID] = assigned[i]
 			}
 		}
@@ -190,7 +200,9 @@ func (s *Station) accept(f *Flight, targets []*Passenger, req AcceptRequest) (*A
 			continue
 		}
 		seat := seats[p.ID]
-		if err := f.Cabin.Take(seat, p.ID); err != nil {
+		if p.Type == PaxInfant {
+			seat = "" // on a lap
+		} else if err := f.Cabin.Take(seat, p.ID); err != nil {
 			return nil, err
 		}
 		p.Seat = seat
@@ -324,7 +336,7 @@ func (f *Flight) spare(comp string) int {
 	}
 	owed := 0
 	for _, p := range f.Passengers {
-		if (p.Status == StatusListed || p.Claimant()) && p.Compartment == comp {
+		if (p.Status == StatusListed || p.Claimant()) && p.Compartment == comp && p.Type != PaxInfant {
 			owed++
 		}
 	}

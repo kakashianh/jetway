@@ -92,9 +92,24 @@ func (f *Flight) claimants() []*Passenger {
 // full, and returns those it seated.
 func (s *Station) seatClaimants(f *Flight) []*Passenger {
 	var seated []*Passenger
+	// An infant who waits goes with the adult: when a passenger of the
+	// party is seated, the party's infants are accepted with them.
+	withInfants := func(p *Passenger) {
+		for _, q := range f.Passengers {
+			if q.Party == p.Party && q.Type == PaxInfant && q.Claimant() {
+				if _, err := s.accept(f, []*Passenger{q}, AcceptRequest{}); err == nil {
+					seated = append(seated, q)
+				}
+			}
+		}
+	}
 	for _, p := range f.claimants() {
+		if p.Type == PaxInfant {
+			continue
+		}
 		if _, err := s.accept(f, []*Passenger{p}, AcceptRequest{}); err == nil {
 			seated = append(seated, p)
+			withInfants(p)
 			continue
 		}
 		for _, comp := range f.Cabin.compartments() {
@@ -110,6 +125,7 @@ func (s *Station) seatClaimants(f *Flight) []*Passenger {
 			// accept records the move to another cabin on the flight.
 			if _, err := s.accept(f, []*Passenger{p}, AcceptRequest{Seat: seats[0]}); err == nil {
 				seated = append(seated, p)
+				withInfants(p)
 				break
 			}
 		}

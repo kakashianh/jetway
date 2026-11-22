@@ -5,6 +5,16 @@ what is fixed below was found by [wholesky](https://github.com/adamf/wholesky)
 driving hundreds of embedded jetway assemblies through a simulated day of
 global airline traffic -- the widening exercise surface is the test plan.
 
+## v0.1.108 — An infant on a lap takes no seat
+- `pkg/dcs` gave every name of a party a seat at acceptance, an infant
+  too. A party of 2 adults and an infant holds 2 seats and took 3, so a
+  cabin sold to its last seat had none for its last passenger. That
+  passenger waited for a seat, and on a full flight was denied boarding,
+  on a flight that was not oversold.
+- An infant is now accepted with no seat of its own. A party's infants
+  wait with its adults when the cabin is full, and are accepted with the
+  first adult who is seated. The load still counts the infant.
+
 ## v0.1.107 — A carrier's price list for what it sells beside the seat
 - `pkg/ancillary` is new. A `Catalogue` is a carrier's optional services
   and its price list for them: a checked bag, a seat chosen in advance,
