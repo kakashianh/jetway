@@ -5,6 +5,49 @@ what is fixed below was found by [wholesky](https://github.com/adamf/wholesky)
 driving hundreds of embedded jetway assemblies through a simulated day of
 global airline traffic -- the widening exercise surface is the test plan.
 
+## v0.1.106 — Overbooking, and the passenger who came to a full cabin
+- An empty seat at departure is 1 of 3 things, and jetway now keeps
+  them apart. A seat that nobody booked is unsold. A seat booked by a
+  passenger who did not come is a no-show. A no-show's seat in a cabin
+  that had reached its limit is spoiled. A passenger who came and found
+  no seat is none of these: that is a denied boarding.
+- `inventory.Shows` is a cabin's record of who came: at each departure,
+  the confirmed bookings and the passengers who showed up. `Shows.Rate`
+  gives the mean show-up rate and its deviation from one departure to
+  the next.
+- `inventory.Deterministic`, `Probabilistic` and `CostBased` are the 3
+  overbooking models of Peter Belobaba's lecture (MIT OpenCourseWare
+  16.75J, lecture 19). Each gives a cabin's authorised capacity.
+  `Expected` gives the denied boardings and the spoiled seats to expect
+  at a limit. The tests hold the models against the lecture's worked
+  figures: 125 and 113 bookings for 100 seats, and the 2 charts of the
+  cost-based example.
+- `Inventory.Authorized` and `Controller.Authorized` take the limit. A
+  cabin then sells to its authorised capacity and not to its seats, the
+  class ladder is nested under that, and availability counts the
+  bookings left. `Pool.Authorized` reports it.
+- `pkg/dcs` refused a booked passenger who came to a full cabin, and
+  reported the passenger as a no-show when the flight closed. The
+  passenger now waits for a seat with a claim to one, ahead of every
+  standby, with the bags held. When check-in closes, the passengers who
+  wait take the seats of the passengers who did not come, in another
+  cabin when their own is full.
+- `Station.Volunteer` records that a seated passenger gives up the seat
+  for the carrier's offer, and gives the seat to the passenger who has
+  waited longest. `POST /api/dcs/flight/{flight}/{date}/volunteer` is
+  the agent's call. `Station.Waiting` lists the passengers who wait.
+- At the door a seat that an accepted passenger never came to the gate
+  for goes to a passenger who waits. A passenger who still has no seat
+  is denied boarding. `Closure.Denied` lists them, with the cause:
+  an oversold cabin or a smaller aircraft. The law treats the 2
+  differently. The PFS reports them under `INVOL`, and a volunteer under
+  `OFFLD`.
+- `Flight.Tally` counts each cabin of a closed flight as revenue
+  management counts it: booked, no-show, offloaded, denied, boarded.
+- An aircraft change gave 2 re-seated passengers the same seat, and
+  displaced nobody when the smaller cabin was too small. A re-seated
+  passenger now takes the seat before the next passenger is seated.
+
 ## v0.1.105 — A forecast learned from a flight's own departures
 - `pkg/inventory` had the optimiser, EMSR-b, and no forecaster. The
   caller gave the demand by class. `inventory.History` is now the

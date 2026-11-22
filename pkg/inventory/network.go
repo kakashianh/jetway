@@ -38,7 +38,7 @@ func (c *Controller) LadderFares(carrier, flightNum, wireDate, board, compartmen
 	for _, d := range demand {
 		fares[d.Class] = d.Fare
 	}
-	return EMSRb(seats, demand), fares
+	return EMSRb(c.limit(carrier, flightNum, wireDate, board, compartment, seats), demand), fares
 }
 
 // bidPrice is the displacement cost of one more seat in a cabin: the fare

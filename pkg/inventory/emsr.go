@@ -100,6 +100,11 @@ type Forecast func(carrier, flightNum, wireDate, board, compartment string, seat
 type Controller struct {
 	Capacity Capacity
 	Forecast Forecast
+	// Authorized, when set, is the cabin's authorised capacity, as the
+	// inventory's field of the same name is: the ladder is then nested
+	// under the bookings the cabin may hold and not under its seats. The
+	// forecaster is still told the seats.
+	Authorized func(carrier, flightNum, wireDate, board, compartment string, seats int) int
 	// BidPrice, when set, values a cabin's marginal seat for network
 	// control in place of the ladder's displacement cost: the caller's
 	// network programme (NetworkBidPrices) supplies the leg duals, and
@@ -136,5 +141,14 @@ func (c *Controller) Levels(carrier, flightNum, wireDate, board, compartment str
 	if !ok || seats <= 0 {
 		return nil
 	}
-	return EMSRb(seats, c.Forecast(carrier, flightNum, wireDate, board, compartment, seats))
+	return EMSRb(c.limit(carrier, flightNum, wireDate, board, compartment, seats), c.Forecast(carrier, flightNum, wireDate, board, compartment, seats))
+}
+
+// limit is the bookings a cabin may hold: its seats, or what revenue
+// management authorised.
+func (c *Controller) limit(carrier, flightNum, wireDate, board, compartment string, seats int) int {
+	if c.Authorized == nil {
+		return seats
+	}
+	return max(c.Authorized(carrier, flightNum, wireDate, board, compartment, seats), 0)
 }
