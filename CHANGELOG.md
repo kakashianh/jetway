@@ -5,6 +5,26 @@ what is fixed below was found by [wholesky](https://github.com/adamf/wholesky)
 driving hundreds of embedded jetway assemblies through a simulated day of
 global airline traffic -- the widening exercise surface is the test plan.
 
+## v0.1.107 — A carrier's price list for what it sells beside the seat
+- `pkg/ancillary` is new. A `Catalogue` is a carrier's optional services
+  and its price list for them: a checked bag, a seat chosen in advance,
+  a seat with more legroom, a meal, the internet, a blanket. jetway had
+  the document that carries such a sale, the EMD, and nothing that said
+  what a service costs a given passenger.
+- The rules for a service are tried in the order they are listed, and
+  the first rule that matches the passenger decides. A rule can ask for
+  a cabin, a booking class, a fare brand, a loyalty tier, a domestic or
+  international itinerary, a distance, a flight time, a peak day, the
+  moment of sale and which unit this is. Its outcome is a price, or
+  "included", or "not offered".
+- `Catalogue.Price` gives the price of one unit, `Total` the price of
+  several units each at its own unit's price, and `Menu` every service
+  that the passenger can buy at a moment. A service with no rule that
+  matches is not for sale.
+- The package carries no sub codes. A caller's catalogue brings its own,
+  and a `Quote` gives the reason for issuance code and the sub code for
+  the EMD coupon.
+
 ## v0.1.106 — Overbooking, and the passenger who came to a full cabin
 - An empty seat at departure is 1 of 3 things, and jetway now keeps
   them apart. A seat that nobody booked is unsold. A seat booked by a

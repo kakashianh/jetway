@@ -19,6 +19,7 @@ about which layer is which.
 | `pkg/mvt` | **Inferred, closely.** AHM 780/781 is paid, but OAG publishes the element tables and verbatim examples this package is built and tested against. |
 | `pkg/dcs` PSM, PTM, LDM, CPM | **Inferred, closely.** RP 1715/1718 and AHM 583/587 are paid, but airports and handlers reproduce the practices' own worked examples; the parsers are tested against those verbatim. |
 | `pkg/dcs` PFS, ETL | **Inferred.** No free reproduction of RP 1719/1719c was found. The layouts follow the PNL family; the category vocabulary is public. |
+| `pkg/ancillary` | **Structure from public rules, contents the caller's.** 14 CFR 260.2 defines an ancillary service. The reason for issuance codes are those of IATA's free EMD guide (`pkg/pnr`). The rules are read by first match in sequence, which is how a filed optional service record is read. The industry sub codes are filed with ATPCO and were not free to read, so the package carries none. |
 | `pkg/dcs` oversale | **Practice, not a document.** A booked passenger at a full cabin waits for a seat, volunteers are asked for, and the rest are denied boarding: the order follows 14 CFR 250.2b and the practice the Government Accountability Office describes (GAO-20-191). No standard sets the procedure inside a departure control system. The PFS reports an involuntary denied boarding under `INVOL` and a volunteer under `OFFLD`, which is this project's reading of the category vocabulary. |
 | `pkg/atfm` | **Specified.** EUROCONTROL's ATFCM Users Manual is public; the slot messages follow its ADEXP field vocabulary and are tested against its Annex B examples verbatim, the regulation causes against its Annex D. The Network Manager's B2B services are not reproduced. |
 | `pkg/crew` | **Specified.** 14 CFR Part 117 is public law; Tables A and B, §117.19, the cumulative limits of §117.23 and the rest of §117.25 are transcribed from the eCFR text and tested value by value; flight attendant rules are §121.467(b) and §121.391(a), likewise. Other regimes are a Rules value the caller supplies. The pay arithmetic (`PayRules`) is **shape specified, numbers the caller's**: credit as the greater of scheduled or actual block, a minimum per duty, a 1:3.5 trip rig and a 1:2 duty rig is section 11.D of APFA's public On-Duty Contract Guide (2016), and a test uses its numbers. |
@@ -140,7 +141,7 @@ host runs this unchanged and a function platform cannot.
 
 Everything importable lives under `pkg/`, in two layers. The codec packages
 (`typeb`, `edifact`, `airimp`, `padis`, `avs`, `ssim`, `ndc`, `matip`, `pnr`,
-`rescode`, `avail`, `pnl`, `baggage`, `mvt`, `dcs`, `aftn`, `ats`, `atfm`, `acars`, `bsp`, `prorate`, `crew`, `mct`, `fare`) must not import the application packages (`gateway`,
+`rescode`, `avail`, `pnl`, `baggage`, `mvt`, `dcs`, `aftn`, `ats`, `atfm`, `acars`, `bsp`, `prorate`, `crew`, `mct`, `fare`, `ancillary`) must not import the application packages (`gateway`,
 `store`, `node`, `queue`, `ingress`, `egress`, `transport`, `config`, `demo`,
 `api`, `metrics`, `telemetry`, `spool`, `ulid`, `ops`). The application packages were
 promoted out of `internal/` on 2026-08-31 so external consumers -- the world
