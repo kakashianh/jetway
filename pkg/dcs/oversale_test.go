@@ -550,14 +550,16 @@ func TestAWaitingFamilysInfantGoesWithTheAdult(t *testing.T) {
 		}
 	}
 	f := mustFlight(t, s)
-	if c := f.Counts(); c.Waiting != 3 {
-		t.Fatalf("the family of 3 at a full cabin: %d wait, want 3", c.Waiting)
+	// 2 passengers wait for seats. The infant waits with them and needs
+	// none, so it is not in the count.
+	if c := f.Counts(); c.Waiting != 2 || c.Standby != 3 {
+		t.Fatalf("the family of 3 at a full cabin: %d wait for seats and %d are on standby, want 2 and 3", c.Waiting, c.Standby)
 	}
 	// Check-in closes with no seat free. The infant is not taken on
 	// alone because it needs no seat: it waits with its adults.
 	f, cleared, err := s.CloseCheckIn(ctx, testKey)
-	if err != nil || len(cleared) != 0 || f.Counts().Waiting != 3 {
-		t.Fatalf("check-in close with no seat free: %v, cleared %+v, %d waiting; want nobody cleared and 3 waiting", err, cleared, f.Counts().Waiting)
+	if err != nil || len(cleared) != 0 || f.Counts().Waiting != 2 || f.Counts().Standby != 3 {
+		t.Fatalf("check-in close with no seat free: %v, cleared %+v, %+v; want nobody cleared, 2 waiting for seats and the infant with them", err, cleared, f.Counts())
 	}
 	v, err := s.Volunteer(ctx, testKey, named(f, "ALFA").ID)
 	if err != nil || v.Seated == nil || v.Seated.Surname != "SMITH" {
@@ -582,5 +584,235 @@ func TestAWaitingFamilysInfantGoesWithTheAdult(t *testing.T) {
 	}
 	if c := mustFlight(t, s).Counts(); c.Waiting != 0 || c.Volunteers != 2 {
 		t.Errorf("after 2 volunteers: %+v; want nobody waiting", c)
+	}
+}
+
+// kingsFlight lists a front cabin passenger, a father with an infant on
+// his lap, and 5 single passengers, for the 4 seats behind the front one.
+func kingsFlight(t *testing.T, s *Station) {
+	t.Helper()
+	m := &pnl.Message{Kind: pnl.KindPNL, Flight: "BA0117", Date: "16DEC", Board: "LHR", Part: 1, Final: true,
+		Groups: []pnl.Group{{Dest: "JFK", Class: "C", Count: 1, Names: []pnl.Name{
+			{Party: 1, Surname: "FRONT", Givens: []string{"FAYMS"}, Elements: []string{".L/FFF000"}}}},
+			{Dest: "JFK", Class: "Y", Count: 7, Names: []pnl.Name{
+				{Party: 2, Surname: "KING", Givens: []string{"JOEMR", "TOMINF"},
+					Elements: []string{".L/KKK001", ".R/INFT HK1 KING/TOMINF"}},
+				{Party: 1, Surname: "ALFA", Givens: []string{"ANNMS"}, Elements: []string{".L/AAA001"}},
+				{Party: 1, Surname: "BRAVO", Givens: []string{"BOBMR"}, Elements: []string{".L/BBB002"}},
+				{Party: 1, Surname: "CHARLIE", Givens: []string{"CYMR"}, Elements: []string{".L/CCC003"}},
+				{Party: 1, Surname: "DELTA", Givens: []string{"DEEMS"}, Elements: []string{".L/DDD004"}},
+				{Party: 1, Surname: "ECHO", Givens: []string{"EDMR"}, Elements: []string{".L/EEE005"}},
+			}}}}
+	if _, err := s.ApplyNameList(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func given(f *Flight, name string) *Passenger {
+	for _, p := range f.Passengers {
+		if p.Given == name {
+			return p
+		}
+	}
+	return nil
+}
+
+// An infant on a lap is nobody's volunteer. It holds no seat to give up,
+// and it comes off with the adult who gives one up.
+//
+// A father with an infant and 3 others have the 4 seats. 2 booked
+// passengers wait. The infant cannot volunteer. The father does: his seat
+// goes to the passenger who has waited longest, and the infant comes off
+// with him. The flight then has 1 volunteer, and at the door 1 passenger
+// more is denied boarding. The infant is in neither count, and in none
+// of the counts that revenue management takes of the cabin.
+func TestAnInfantOnALapIsNobodysVolunteer(t *testing.T) {
+	ctx := context.Background()
+	s := small(t)
+	kingsFlight(t, s)
+	for _, loc := range []string{"FFF000", "KKK001", "AAA001", "BBB002", "CCC003", "DDD004", "EEE005"} {
+		if _, err := s.Accept(ctx, testKey, AcceptRequest{Locator: loc}); err != nil {
+			t.Fatalf("%s: %v", loc, err)
+		}
+	}
+	f, _, err := s.CloseCheckIn(ctx, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := f.Counts(); c.Waiting != 2 || len(f.Cabin.Occupied) != 5 {
+		t.Fatalf("6 passengers and an infant for 4 seats: %+v, %d seats taken; want 2 waiting and every seat taken", c, len(f.Cabin.Occupied))
+	}
+	infant, father := given(f, "TOMINF"), given(f, "JOEMR")
+	if infant == nil || infant.Type != PaxInfant || infant.Status != StatusAccepted || infant.Seat != "" {
+		t.Fatalf("the infant: %+v; want accepted on a lap", infant)
+	}
+
+	// The infant cannot give up a seat.
+	if _, err := s.Volunteer(ctx, testKey, infant.ID); !errors.Is(err, ErrLapInfant) {
+		t.Fatalf("an infant on a lap volunteered: %v; want ErrLapInfant", err)
+	}
+	if c := mustFlight(t, s).Counts(); c.Waiting != 2 || c.Volunteers != 0 || c.Denied != 0 {
+		t.Fatalf("after the infant was asked: %+v; want nothing changed", c)
+	}
+
+	// The father gives up his seat.
+	v, err := s.Volunteer(ctx, testKey, father.ID)
+	if err != nil || v.Seated == nil || v.Seated.Surname != "DELTA" {
+		t.Fatalf("the father's seat: %v %+v; want DELTA seated", err, v)
+	}
+	if len(v.With) != 1 || v.With[0].Given != "TOMINF" {
+		t.Fatalf("the infant did not come off with the father: %+v", v.With)
+	}
+	f = mustFlight(t, s)
+	if in := given(f, "TOMINF"); in.Flying() {
+		t.Fatalf("the infant flies without its adult: %+v", in)
+	}
+	if c := f.Counts(); c.Volunteers != 1 || c.Denied != 1 || c.Waiting != 1 {
+		t.Fatalf("after the father volunteered: %+v; want 1 volunteer, 1 denied, 1 waiting", c)
+	}
+
+	for _, p := range f.Passengers {
+		if p.Status == StatusAccepted {
+			if _, err := s.Board(ctx, testKey, p.ID); err != nil {
+				t.Fatalf("board %s: %v", p.Display(), err)
+			}
+		}
+	}
+	cl, err := s.CloseFlight(ctx, testKey, CloseOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The father and ECHO, and not the infant.
+	if len(cl.Denied) != 2 {
+		t.Errorf("the door has %d passengers denied boarding; want the father and ECHO", len(cl.Denied))
+	}
+	for _, p := range cl.Denied {
+		if p.Type == PaxInfant {
+			t.Errorf("the infant %s is on the list of passengers denied boarding", p.Display())
+		}
+	}
+	if cl.Counts.Denied != 2 || cl.Counts.Volunteers != 1 {
+		t.Errorf("at the door: %+v; want 2 denied, 1 of them a volunteer", cl.Counts)
+	}
+	y := cl.Flight.Tally()["Y"]
+	if y.Booked != 6 || y.Denied != 2 || y.Volunteers != 1 || y.Boarded != 4 || y.NoShows != 0 {
+		t.Errorf("revenue management's count of the cabin: %+v; want 6 booked, 4 boarded, 2 denied, 1 of them a volunteer", y)
+	}
+}
+
+// The infant stays with the adult of its party who flies. 2 adults with
+// an infant and 2 others have the 4 seats, and 1 passenger waits. The
+// father gives up his seat. The mother flies, and the infant with her.
+func TestAnInfantStaysWithTheAdultWhoFlies(t *testing.T) {
+	ctx := context.Background()
+	s := small(t)
+	m := &pnl.Message{Kind: pnl.KindPNL, Flight: "BA0117", Date: "16DEC", Board: "LHR", Part: 1, Final: true,
+		Groups: []pnl.Group{{Dest: "JFK", Class: "C", Count: 1, Names: []pnl.Name{
+			{Party: 1, Surname: "FRONT", Givens: []string{"FAYMS"}, Elements: []string{".L/FFF000"}}}},
+			{Dest: "JFK", Class: "Y", Count: 6, Names: []pnl.Name{
+				{Party: 3, Surname: "SMITH", Givens: []string{"JOHNMR", "ANNMRS", "TIMINF"},
+					Elements: []string{".L/SSS009", ".R/INFT HK1 SMITH/TIMINF"}},
+				{Party: 1, Surname: "ALFA", Givens: []string{"ANNMS"}, Elements: []string{".L/AAA001"}},
+				{Party: 1, Surname: "BRAVO", Givens: []string{"BOBMR"}, Elements: []string{".L/BBB002"}},
+				{Party: 1, Surname: "DELTA", Givens: []string{"DEEMS"}, Elements: []string{".L/DDD004"}},
+			}}}}
+	if _, err := s.ApplyNameList(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	for _, loc := range []string{"FFF000", "SSS009", "AAA001", "BBB002", "DDD004"} {
+		if _, err := s.Accept(ctx, testKey, AcceptRequest{Locator: loc}); err != nil {
+			t.Fatalf("%s: %v", loc, err)
+		}
+	}
+	f, _, err := s.CloseCheckIn(ctx, testKey)
+	if err != nil || f.Counts().Waiting != 1 {
+		t.Fatalf("check-in close: %v, %+v; want 1 waiting", err, f.Counts())
+	}
+	v, err := s.Volunteer(ctx, testKey, given(f, "JOHNMR").ID)
+	if err != nil || v.Seated == nil || v.Seated.Surname != "DELTA" {
+		t.Fatalf("the father's seat: %v %+v", err, v)
+	}
+	if len(v.With) != 0 {
+		t.Errorf("the infant came off with the father while the mother flies: %+v", v.With)
+	}
+	f = mustFlight(t, s)
+	if in := given(f, "TIMINF"); in.Status != StatusAccepted {
+		t.Errorf("the infant is %s; want accepted, with the mother", in.Status)
+	}
+	if c := f.Counts(); c.Volunteers != 1 || c.Waiting != 0 {
+		t.Errorf("after the father volunteered: %+v; want 1 volunteer and nobody waiting", c)
+	}
+}
+
+// An adult denied boarding at the door has an infant who does not fly
+// either, and who is not a denied boarding. 4 passengers have the 4
+// seats. A father with an infant waits: 1 passenger waits for a seat,
+// not 2. Nobody gives up a seat. At the door the father is denied
+// boarding, and the count is 1.
+func TestADeniedAdultsInfantIsNotADeniedBoarding(t *testing.T) {
+	ctx := context.Background()
+	s := small(t)
+	kingsFlight(t, s)
+	for _, loc := range []string{"FFF000", "AAA001", "BBB002", "CCC003", "DDD004", "KKK001"} {
+		if _, err := s.Accept(ctx, testKey, AcceptRequest{Locator: loc}); err != nil {
+			t.Fatalf("%s: %v", loc, err)
+		}
+	}
+	f, _, err := s.CloseCheckIn(ctx, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := f.Counts(); c.Waiting != 1 {
+		t.Fatalf("a father with an infant waits: %d wait for a seat, want 1", c.Waiting)
+	}
+	came, asked := false, false
+	for _, a := range f.Alerts {
+		if a.Code != "oversold" {
+			continue
+		}
+		if strings.Contains(a.Detail, "volunteers are wanted") {
+			asked = true
+			if !strings.HasPrefix(a.Detail, "1 passenger") {
+				t.Errorf("the call for volunteers says %q; want 1 passenger", a.Detail)
+			}
+		} else {
+			came = true
+			if !strings.HasPrefix(a.Detail, "KING/JOEMR and 0 more") {
+				t.Errorf("when the father came the alert said %q; want him and 0 more", a.Detail)
+			}
+		}
+	}
+	if !came || !asked {
+		t.Errorf("alerts when the father came %v and at check-in close %v; want both", came, asked)
+	}
+	for _, p := range f.Passengers {
+		if p.Status == StatusAccepted {
+			if _, err := s.Board(ctx, testKey, p.ID); err != nil {
+				t.Fatalf("board %s: %v", p.Display(), err)
+			}
+		}
+	}
+	cl, err := s.CloseFlight(ctx, testKey, CloseOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cl.Denied) != 1 || cl.Denied[0].Given != "JOEMR" {
+		t.Errorf("denied boarding at the door: %d passengers; want the father alone", len(cl.Denied))
+	}
+	if cl.Counts.Denied != 1 || cl.Counts.Volunteers != 0 {
+		t.Errorf("at the door: %+v; want 1 denied", cl.Counts)
+	}
+	if in := given(cl.Flight, "TOMINF"); in.Flying() || in.Status == StatusNoShow {
+		t.Errorf("the infant is %s; want not flying, and not a no-show", in.Status)
+	}
+	// ECHO never came. The father came and was denied.
+	y := cl.Flight.Tally()["Y"]
+	if y.Booked != 6 || y.Denied != 1 || y.NoShows != 1 || y.Boarded != 4 {
+		t.Errorf("revenue management's count of the cabin: %+v; want 6 booked, 4 boarded, 1 denied, 1 no-show", y)
+	}
+	for _, a := range cl.Flight.Alerts {
+		if a.Code == "denied_boarding" && !strings.HasPrefix(a.Detail, "1 passenger") {
+			t.Errorf("the alert says %q; want 1 passenger", a.Detail)
+		}
 	}
 }

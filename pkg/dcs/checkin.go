@@ -190,8 +190,15 @@ func (s *Station) accept(f *Flight, targets []*Passenger, req AcceptRequest) (*A
 		// Bags a passenger brought while they waited for a seat.
 		bags = lead.HeldBags
 	}
-	if n := len(waits); n > 0 {
-		f.alert(now, "oversold", fmt.Sprintf("%s and %d more with confirmed bookings have no seat and wait for one", targets[0].Display(), n-1))
+	if len(waits) > 0 {
+		// An infant who waits with the party needs no seat.
+		n := 0
+		for _, p := range targets {
+			if waits[p.ID] && p.Type != PaxInfant {
+				n++
+			}
+		}
+		f.alert(now, "oversold", fmt.Sprintf("%s and %d more with confirmed bookings have no seat and wait for one", targets[0].Display(), max(n-1, 0)))
 	}
 	for _, p := range targets {
 		if waits[p.ID] {
@@ -636,14 +643,18 @@ func (s *Station) CloseFlight(ctx context.Context, k Key, opts CloseOptions) (*C
 		p.BoardedAt = &now
 		cl.Onloaded = append(cl.Onloaded, p)
 	}
+	// An infant who waited with an adult does not fly either. It is not
+	// a denied boarding: it held no seat, and nothing is owed to it.
 	denied := 0
 	for _, p := range f.Passengers {
 		if p.Claimant() {
 			p.Status = StatusDenied
 			p.Category = CategoryInvol
-			denied++
+			if p.Type != PaxInfant {
+				denied++
+			}
 		}
-		if p.Status == StatusDenied {
+		if p.Status == StatusDenied && p.Type != PaxInfant {
 			cl.Denied = append(cl.Denied, p)
 		}
 	}

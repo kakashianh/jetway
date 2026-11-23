@@ -105,7 +105,7 @@ func dcsError(w http.ResponseWriter, err error) {
 	case errors.Is(err, dcs.ErrFlightClosed), errors.Is(err, dcs.ErrCheckInClosed), errors.Is(err, dcs.ErrCheckInOpen),
 		errors.Is(err, dcs.ErrAlreadyAccepted), errors.Is(err, dcs.ErrNotAccepted), errors.Is(err, dcs.ErrAlreadyBoarded),
 		errors.Is(err, dcs.ErrSeatTaken), errors.Is(err, dcs.ErrNoSeat), errors.Is(err, dcs.ErrListAfterAccept),
-		errors.Is(err, dcs.ErrNotOversold):
+		errors.Is(err, dcs.ErrNotOversold), errors.Is(err, dcs.ErrLapInfant):
 		http.Error(w, err.Error(), http.StatusConflict)
 	default:
 		http.Error(w, err.Error(), http.StatusInternalServerError)

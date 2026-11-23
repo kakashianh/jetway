@@ -5,6 +5,19 @@ what is fixed below was found by [wholesky](https://github.com/adamf/wholesky)
 driving hundreds of embedded jetway assemblies through a simulated day of
 global airline traffic -- the widening exercise surface is the test plan.
 
+## v0.1.109 — An infant on a lap is nobody's volunteer
+- `pkg/dcs` let an infant on a lap give up a seat it did not hold, and
+  counted an infant as a volunteer or as a denied boarding when its adult
+  was one. A carrier that pays by those counts paid the infant.
+- `Station.Volunteer` now answers `ErrLapInfant` for an infant. When an
+  adult gives up a seat and no other adult of the party flies, the
+  party's infants come off too, in `Volunteered.With`.
+- An infant on a lap is in none of the counts of seats. `Tally` leaves
+  it out, and so do the waiting, denied and volunteer counts of
+  `Counts` and the list `Closure.Denied`. The alerts count the
+  passengers who need seats. The accepted and boarded counts and the
+  load still have the infant.
+
 ## v0.1.108 — An infant on a lap takes no seat
 - `pkg/dcs` gave every name of a party a seat at acceptance, an infant
   too. A party of 2 adults and an infant holds 2 seats and took 3, so a

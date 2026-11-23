@@ -323,6 +323,8 @@ type Counts struct {
 	Offload  int `json:"offloaded"`
 	// Waiting is the standbys with a claim to a seat. Denied is the
 	// passengers denied boarding, and Volunteers those of them who agreed.
+	// An infant on a lap is in none of the 3: it waits and comes off with
+	// its adults, and holds no seat.
 	Waiting    int `json:"waiting,omitempty"`
 	Denied     int `json:"denied,omitempty"`
 	Volunteers int `json:"volunteers,omitempty"`
@@ -344,10 +346,13 @@ func (f *Flight) Counts() Counts {
 			c.Boarded++
 		case StatusStandby:
 			c.Standby++
-			if p.Oversale != "" {
+			if p.Oversale != "" && p.Type != PaxInfant {
 				c.Waiting++
 			}
 		case StatusDenied:
+			if p.Type == PaxInfant {
+				break
+			}
 			c.Denied++
 			if p.Volunteer {
 				c.Volunteers++

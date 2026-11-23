@@ -34,9 +34,19 @@ import (
 // A passenger denied boarding came to the airport. They are never
 // reported as a no-show, and the count a revenue management system takes
 // from the closed flight (Tally) keeps the two apart.
+//
+// An infant on a lap holds no seat, so it has no claim to one and none to
+// give up. It waits with its adults, is accepted with the first of them
+// who is seated, and comes off with the last of them who does not fly. It
+// is not a volunteer and not a denied boarding, and it is in none of the
+// counts of seats: not in Tally, and not in the waiting, denied and
+// volunteer counts of Counts.
 
 // ErrNotOversold answers a volunteer when nobody waits for a seat.
 var ErrNotOversold = errors.New("dcs: no passenger with a claim waits for a seat")
+
+// ErrLapInfant answers a volunteer who is an infant on a lap.
+var ErrLapInfant = errors.New("dcs: an infant on a lap holds no seat to give up")
 
 // confirmed reports whether every passenger of a group holds a confirmed
 // booking and has not been handled yet: the name list carried them.
@@ -58,14 +68,26 @@ func (f *Flight) wait(p *Passenger, why Oversale, now time.Time) {
 }
 
 // waiting counts the passengers who wait for a seat with a claim to one.
+// An infant who waits with its adults needs no seat.
 func (f *Flight) waiting() int {
 	n := 0
 	for _, p := range f.Passengers {
-		if p.Claimant() {
+		if p.Claimant() && p.Type != PaxInfant {
 			n++
 		}
 	}
 	return n
+}
+
+// adultFlies reports whether an adult of a party holds a seat on the
+// flight: someone whose lap an infant of the party can be on.
+func (f *Flight) adultFlies(party string) bool {
+	for _, p := range f.Passengers {
+		if p.Party == party && p.Type == PaxAdult && p.Flying() {
+			return true
+		}
+	}
+	return false
 }
 
 // claimants lists the passengers who wait with a claim, the one who has
@@ -160,6 +182,10 @@ type Volunteered struct {
 	// tags of the bags they had brought. Nil when the seat suited nobody
 	// who waits.
 	Seated *Passenger `json:"seated,omitempty"`
+	// With is the infants who came off with the volunteer: those on the
+	// laps of a party that has no other adult on the flight. They are not
+	// volunteers. Their bags are still attached, for the caller to pull.
+	With []*Passenger `json:"with,omitempty"`
 }
 
 // Volunteer records that a passenger who holds a seat gives it up for the
@@ -184,6 +210,9 @@ func (s *Station) Volunteer(ctx context.Context, k Key, passengerID int) (*Volun
 	if !p.Flying() {
 		return nil, ErrNotAccepted
 	}
+	if p.Type == PaxInfant {
+		return nil, ErrLapInfant
+	}
 	if f.waiting() == 0 {
 		return nil, ErrNotOversold
 	}
@@ -198,6 +227,23 @@ func (s *Station) Volunteer(ctx context.Context, k Key, passengerID int) (*Volun
 		p.Bags[i].Offloaded = true
 	}
 	out := &Volunteered{}
+	// An infant on the volunteer's lap comes off with them, unless
+	// another adult of the party still flies.
+	if !f.adultFlies(p.Party) {
+		for _, q := range f.Passengers {
+			if q.Party != p.Party || q.Type != PaxInfant || !q.Flying() {
+				continue
+			}
+			q.Status = StatusDenied
+			q.Volunteer = true
+			q.OffloadReason = "with volunteer"
+			for i := range q.Bags {
+				q.Bags[i].Offloaded = true
+			}
+			c := *q
+			out.With = append(out.With, &c)
+		}
+	}
 	if seated := s.seatClaimants(f); len(seated) > 0 {
 		c := *seated[0]
 		out.Seated = &c
@@ -214,7 +260,8 @@ func (s *Station) Volunteer(ctx context.Context, k Key, passengerID int) (*Volun
 
 // Tally is one cabin of a flight counted as revenue management counts
 // it. Passengers are counted in the cabin they booked, whichever cabin
-// seated them.
+// seated them. An infant on a lap is in none of the counts: it is not a
+// booking of a seat.
 type Tally struct {
 	// Seats is the cabin's seats on the aircraft that took the flight.
 	Seats int `json:"seats"`
@@ -255,7 +302,8 @@ func (f *Flight) Tally() map[string]Tally {
 		}
 	}
 	for _, p := range f.Passengers {
-		if p.Status == StatusDeleted {
+		// An infant on a lap is not a booking of a seat.
+		if p.Status == StatusDeleted || p.Type == PaxInfant {
 			continue
 		}
 		comp := p.Compartment
