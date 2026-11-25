@@ -120,6 +120,11 @@ func (f *Flight) resolve(req AcceptRequest) ([]*Passenger, error) {
 
 // accept does the work under the lock. Seats are assigned per compartment,
 // the party together where a row allows.
+//
+// While check-in is open, passengers with confirmed bookings who come to
+// a cabin with no seat left are not refused. They wait for a seat with a
+// claim to one, and the acceptance returns them as standbys with no seat
+// and no tags (see oversale.go).
 func (s *Station) accept(f *Flight, targets []*Passenger, req AcceptRequest) (*Acceptance, error) {
 	byComp := map[string][]*Passenger{}
 	var comps []string
@@ -131,6 +136,7 @@ func (s *Station) accept(f *Flight, targets []*Passenger, req AcceptRequest) (*A
 	}
 	sort.Strings(comps)
 	seats := map[int]string{}
+	waits := map[int]bool{}
 	if req.Seat != "" {
 		seat := strings.ToUpper(strings.TrimSpace(req.Seat))
 		comp, ok := f.Cabin.Has(seat)
@@ -151,24 +157,64 @@ func (s *Station) accept(f *Flight, targets []*Passenger, req AcceptRequest) (*A
 	} else {
 		for _, comp := range comps {
 			group := byComp[comp]
-			assigned, err := f.Cabin.Assign(comp, len(group))
+			// An infant travels on an adult's lap and takes no seat. A
+			// party of 2 adults and an infant needs 2 seats, which is
+			// what it was sold. Seated as 3, a full cabin had no seat for
+			// the last passenger it had sold one to.
+			var seated []*Passenger
+			for _, p := range group {
+				if p.Type != PaxInfant {
+					seated = append(seated, p)
+				}
+			}
+			assigned, err := f.Cabin.Assign(comp, len(seated))
+			if err == ErrNoSeat && f.State == StateOpen && confirmed(group) {
+				for _, p := range group {
+					waits[p.ID] = true
+				}
+				continue
+			}
 			if err != nil {
 				return nil, err
 			}
-			for i, p := range group {
+			for i, p := range seated {
 				seats[p.ID] = assigned[i]
 			}
 		}
 	}
 	now := s.now()
 	acc := &Acceptance{}
+	lead := targets[0]
+	bags := req.Bags
+	if len(bags) == 0 {
+		// Bags a passenger brought while they waited for a seat.
+		bags = lead.HeldBags
+	}
+	if len(waits) > 0 {
+		// An infant who waits with the party needs no seat.
+		n := 0
+		for _, p := range targets {
+			if waits[p.ID] && p.Type != PaxInfant {
+				n++
+			}
+		}
+		f.alert(now, "oversold", fmt.Sprintf("%s and %d more with confirmed bookings have no seat and wait for one", targets[0].Display(), max(n-1, 0)))
+	}
 	for _, p := range targets {
+		if waits[p.ID] {
+			f.wait(p, OversaleSold, now)
+			acc.Passengers = append(acc.Passengers, p)
+			continue
+		}
 		seat := seats[p.ID]
-		if err := f.Cabin.Take(seat, p.ID); err != nil {
+		if p.Type == PaxInfant {
+			seat = "" // on a lap
+		} else if err := f.Cabin.Take(seat, p.ID); err != nil {
 			return nil, err
 		}
 		p.Seat = seat
 		p.Status = StatusAccepted
+		p.Oversale, p.WaitingSince = "", nil
 		p.Sequence = f.nextSeq
 		f.nextSeq++
 		t := now
@@ -186,8 +232,13 @@ func (s *Station) accept(f *Flight, targets []*Passenger, req AcceptRequest) (*A
 		}
 		acc.Passengers = append(acc.Passengers, p)
 	}
-	lead := targets[0]
-	for _, w := range req.Bags {
+	if waits[lead.ID] {
+		// The bags wait with the passenger and are tagged with the seat.
+		lead.HeldBags = append([]int(nil), bags...)
+		return acc, nil
+	}
+	lead.HeldBags = nil
+	for _, w := range bags {
 		b := Bag{Tag: s.nextTag(), Weight: w}
 		lead.Bags = append(lead.Bags, b)
 		acc.Tags = append(acc.Tags, b)
@@ -292,7 +343,7 @@ func (f *Flight) spare(comp string) int {
 	}
 	owed := 0
 	for _, p := range f.Passengers {
-		if p.Status == StatusListed && p.Compartment == comp {
+		if (p.Status == StatusListed || p.Claimant()) && p.Compartment == comp && p.Type != PaxInfant {
 			owed++
 		}
 	}
@@ -353,6 +404,10 @@ func (s *Station) Offload(ctx context.Context, k Key, passengerID int, reason st
 		return nil, ErrNotAccepted
 	}
 	f.offload(p, reason)
+	if f.State == StateCheckInClosed {
+		// The seat goes to a passenger who waits for one with a claim.
+		s.seatClaimants(f)
+	}
 	f.Revision++
 	if err := s.store().SaveFlight(ctx, f); err != nil {
 		return nil, err
@@ -373,8 +428,11 @@ func (f *Flight) offload(p *Passenger, reason string) {
 }
 
 // CloseCheckIn stops acceptance and clears the standby list into whatever
-// seats remain: revenue passengers first, staff last, in the order they
-// presented.
+// seats remain. Passengers with a claim to a seat come first, the one who
+// has waited longest ahead, and are seated in another cabin when their
+// own is full. Then come revenue standbys, then staff, in the order they
+// presented. A passenger on the list who has not come by now has lost the
+// seat: it is one of the seats that remain.
 func (s *Station) CloseCheckIn(ctx context.Context, k Key) (*Flight, []*Passenger, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -400,9 +458,10 @@ func (s *Station) closeCheckIn(f *Flight) []*Passenger {
 	now := s.now()
 	f.State = StateCheckInClosed
 	f.CheckInClosedAt = &now
+	cleared := s.seatClaimants(f)
 	var standby []*Passenger
 	for _, p := range f.Passengers {
-		if p.Status == StatusStandby {
+		if p.Status == StatusStandby && p.Oversale == "" {
 			standby = append(standby, p)
 		}
 	}
@@ -413,12 +472,14 @@ func (s *Station) closeCheckIn(f *Flight) []*Passenger {
 		}
 		return standby[i].ID < standby[j].ID
 	})
-	var cleared []*Passenger
 	for _, p := range standby {
 		if _, err := s.accept(f, []*Passenger{p}, AcceptRequest{}); err != nil {
 			continue
 		}
 		cleared = append(cleared, p)
+	}
+	if n := f.waiting(); n > 0 {
+		f.alert(now, "oversold", fmt.Sprintf("%d passengers with a claim to a seat have none: volunteers are wanted", n))
 	}
 	return cleared
 }
@@ -452,6 +513,13 @@ type Closure struct {
 	// boarded -- with their bags still attached so the caller can send the
 	// sortation system a BSM DEL for each.
 	Offloaded []*Passenger `json:"offloaded,omitempty"`
+	// Onloaded lists the passengers with a claim to a seat who took, at
+	// the door, a seat an accepted passenger never came to the gate for.
+	Onloaded []*Passenger `json:"onloaded,omitempty"`
+	// Denied lists the passengers denied boarding: the volunteers, and
+	// those who still waited for a seat when the door closed. The caller
+	// owes them what the law and its own offer say.
+	Denied []*Passenger `json:"denied,omitempty"`
 
 	// Message texts, ready for a Type B envelope. Lists may run to parts.
 	PFS []string `json:"pfs"`
@@ -538,6 +606,11 @@ func (e *UnreconciledError) Is(target error) bool { return target == ErrUnreconc
 // CloseFlight is the door closing: no-shows are declared, unboarded
 // passengers offloaded, the load computed, the messages built. After this
 // the flight does not change.
+//
+// A passenger who waits with a claim to a seat takes one an accepted
+// passenger never came to the gate for, and boards. One who still has no
+// seat is denied boarding, which the final sales message reports as that
+// and not as a no-show.
 func (s *Station) CloseFlight(ctx context.Context, k Key, opts CloseOptions) (*Closure, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -564,6 +637,29 @@ func (s *Station) CloseFlight(ctx context.Context, k Key, opts CloseOptions) (*C
 			f.offload(p, "not boarded at close")
 			cl.Offloaded = append(cl.Offloaded, p)
 		}
+	}
+	for _, p := range s.seatClaimants(f) {
+		p.Status = StatusBoarded
+		p.BoardedAt = &now
+		cl.Onloaded = append(cl.Onloaded, p)
+	}
+	// An infant who waited with an adult does not fly either. It is not
+	// a denied boarding: it held no seat, and nothing is owed to it.
+	denied := 0
+	for _, p := range f.Passengers {
+		if p.Claimant() {
+			p.Status = StatusDenied
+			p.Category = CategoryInvol
+			if p.Type != PaxInfant {
+				denied++
+			}
+		}
+		if p.Status == StatusDenied && p.Type != PaxInfant {
+			cl.Denied = append(cl.Denied, p)
+		}
+	}
+	if denied > 0 {
+		f.alert(now, "denied_boarding", fmt.Sprintf("%d passengers with a claim to a seat were denied boarding", denied))
 	}
 	rec := reconcile(f)
 	if opts.RequireReconciled && !rec.Clear() {

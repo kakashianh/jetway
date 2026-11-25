@@ -238,10 +238,13 @@ func pfsCategory(p *Passenger) string {
 	switch p.Status {
 	case StatusNoShow:
 		return "NOSHO"
-	case StatusOffloaded:
-		if p.Category == CategoryInvol {
-			return "INVOL"
+	case StatusDenied:
+		// A volunteer was accepted and came off by agreement.
+		if p.Volunteer {
+			return "OFFLD"
 		}
+		return "INVOL"
+	case StatusOffloaded:
 		return "OFFLD"
 	case StatusBoarded, StatusAccepted:
 		if p.DeletedAfterAcceptance {

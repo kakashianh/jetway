@@ -5,6 +5,252 @@ what is fixed below was found by [wholesky](https://github.com/adamf/wholesky)
 driving hundreds of embedded jetway assemblies through a simulated day of
 global airline traffic -- the widening exercise surface is the test plan.
 
+## v0.1.109 — An infant on a lap is nobody's volunteer
+- `pkg/dcs` let an infant on a lap give up a seat it did not hold, and
+  counted an infant as a volunteer or as a denied boarding when its adult
+  was one. A carrier that pays by those counts paid the infant.
+- `Station.Volunteer` now answers `ErrLapInfant` for an infant. When an
+  adult gives up a seat and no other adult of the party flies, the
+  party's infants come off too, in `Volunteered.With`.
+- An infant on a lap is in none of the counts of seats. `Tally` leaves
+  it out, and so do the waiting, denied and volunteer counts of
+  `Counts` and the list `Closure.Denied`. The alerts count the
+  passengers who need seats. The accepted and boarded counts and the
+  load still have the infant.
+
+## v0.1.108 — An infant on a lap takes no seat
+- `pkg/dcs` gave every name of a party a seat at acceptance, an infant
+  too. A party of 2 adults and an infant holds 2 seats and took 3, so a
+  cabin sold to its last seat had none for its last passenger. That
+  passenger waited for a seat, and on a full flight was denied boarding,
+  on a flight that was not oversold.
+- An infant is now accepted with no seat of its own. A party's infants
+  wait with its adults when the cabin is full, and are accepted with the
+  first adult who is seated. The load still counts the infant.
+
+## v0.1.107 — A carrier's price list for what it sells beside the seat
+- `pkg/ancillary` is new. A `Catalogue` is a carrier's optional services
+  and its price list for them: a checked bag, a seat chosen in advance,
+  a seat with more legroom, a meal, the internet, a blanket. jetway had
+  the document that carries such a sale, the EMD, and nothing that said
+  what a service costs a given passenger.
+- The rules for a service are tried in the order they are listed, and
+  the first rule that matches the passenger decides. A rule can ask for
+  a cabin, a booking class, a fare brand, a loyalty tier, a domestic or
+  international itinerary, a distance, a flight time, a peak day, the
+  moment of sale and which unit this is. Its outcome is a price, or
+  "included", or "not offered".
+- `Catalogue.Price` gives the price of one unit, `Total` the price of
+  several units each at its own unit's price, and `Menu` every service
+  that the passenger can buy at a moment. A service with no rule that
+  matches is not for sale.
+- The package carries no sub codes. A caller's catalogue brings its own,
+  and a `Quote` gives the reason for issuance code and the sub code for
+  the EMD coupon.
+
+## v0.1.106 — Overbooking, and the passenger who came to a full cabin
+- An empty seat at departure is 1 of 3 things, and jetway now keeps
+  them apart. A seat that nobody booked is unsold. A seat booked by a
+  passenger who did not come is a no-show. A no-show's seat in a cabin
+  that had reached its limit is spoiled. A passenger who came and found
+  no seat is none of these: that is a denied boarding.
+- `inventory.Shows` is a cabin's record of who came: at each departure,
+  the confirmed bookings and the passengers who showed up. `Shows.Rate`
+  gives the mean show-up rate and its deviation from one departure to
+  the next.
+- `inventory.Deterministic`, `Probabilistic` and `CostBased` are the 3
+  overbooking models of Peter Belobaba's lecture (MIT OpenCourseWare
+  16.75J, lecture 19). Each gives a cabin's authorised capacity.
+  `Expected` gives the denied boardings and the spoiled seats to expect
+  at a limit. The tests hold the models against the lecture's worked
+  figures: 125 and 113 bookings for 100 seats, and the 2 charts of the
+  cost-based example.
+- `Inventory.Authorized` and `Controller.Authorized` take the limit. A
+  cabin then sells to its authorised capacity and not to its seats, the
+  class ladder is nested under that, and availability counts the
+  bookings left. `Pool.Authorized` reports it.
+- `pkg/dcs` refused a booked passenger who came to a full cabin, and
+  reported the passenger as a no-show when the flight closed. The
+  passenger now waits for a seat with a claim to one, ahead of every
+  standby, with the bags held. When check-in closes, the passengers who
+  wait take the seats of the passengers who did not come, in another
+  cabin when their own is full.
+- `Station.Volunteer` records that a seated passenger gives up the seat
+  for the carrier's offer, and gives the seat to the passenger who has
+  waited longest. `POST /api/dcs/flight/{flight}/{date}/volunteer` is
+  the agent's call. `Station.Waiting` lists the passengers who wait.
+- At the door a seat that an accepted passenger never came to the gate
+  for goes to a passenger who waits. A passenger who still has no seat
+  is denied boarding. `Closure.Denied` lists them, with the cause:
+  an oversold cabin or a smaller aircraft. The law treats the 2
+  differently. The PFS reports them under `INVOL`, and a volunteer under
+  `OFFLD`.
+- `Flight.Tally` counts each cabin of a closed flight as revenue
+  management counts it: booked, no-show, offloaded, denied, boarded.
+- An aircraft change gave 2 re-seated passengers the same seat, and
+  displaced nobody when the smaller cabin was too small. A re-seated
+  passenger now takes the seat before the next passenger is seated.
+
+## v0.1.105 — A forecast learned from a flight's own departures
+- `pkg/inventory` had the optimiser, EMSR-b, and no forecaster. The
+  caller gave the demand by class. `inventory.History` is now the
+  forecaster: the booking record of one flight's cabin over its past
+  departures, and the class controls that the record gives.
+- The record is kept by time frame and by strategy. A strategy is the
+  lowest class on sale. For each one the record holds how long it was in
+  force and what was sold in all classes meanwhile. `Log.Expose` and
+  `Log.Sale` write a departure, and `History.Record` adds it.
+- Bookings are divided by the time on sale. A class that was closed took
+  no bookings, and a forecast that reads those sales as demand protects
+  fewer seats at each departure. The division is the maximum-likelihood
+  rate of a Poisson stream that was observed for part of the time.
+- `MarginalRevenue` is the marginal revenue transformation of Fiig,
+  Isler, Hopperstad and Belobaba (2010). It turns the demand and revenue
+  of each strategy into independent demands at adjusted fares, which
+  EMSR-b can take. A traveller who would pay a higher fare buys the lower
+  fare when it is on sale, and the adjusted fare of the lower class
+  counts that loss. The tests hold `MarginalRevenue` and `EMSRb` against
+  tables 1 and 2 of the paper.
+- `History.Controls` gives each class's value, the seats to hold back
+  from it, and whether to sell it, at the start of a time frame.
+  `Authorizations` turns the controls into the nested limits that an
+  `Inventory` sells under. `History.ToCome` gives the demand still to
+  come by class.
+- `History.Method` selects how the record is read, so that the 3 ways can
+  be measured against each other: fare adjusted, unconstrained class by
+  class, or sales read as demand. A test runs example 5 of Cooper,
+  Homem-de-Mello and Kleywegt's spiral-down paper. The manager's own
+  model protects 70 seats and the best level is 95, as the paper has
+  them. From 70, sales read as demand end at 7 seats protected and a
+  revenue of 72. Fare adjustment ends at 94 seats and a revenue of 96.5.
+- A strategy that is no longer used is forgotten after about 3 weeks of
+  departures, and its class is then tried again at its fare.
+  `History.Salt` spreads that over 2 weeks, so the flights of a carrier
+  do not all try their closed classes again on one day.
+
+## v0.1.104 — A split store exports its records
+- `store.Split` did not implement `store.Exporter`. A caller that asked
+  a store for its records one by one found that a hosted carrier's
+  store, with its messages in memory and its records in Postgres, could
+  not give them. `Split.ExportPNRs` now streams from the records store.
+
+## v0.1.103 — An empty override is taken off
+- `SetOverride` with an empty status stored the empty status. The next
+  request for the class was answered with no status code. An empty
+  status now removes the override, in `pkg/inventory` and in the
+  gateway's simple inventory, and the class sells as its ladder says.
+
+## v0.1.102 — An own sale does not write to a published record
+- v0.1.100 decided a carrier's own segments on the record that `Book`
+  had just published on the bus. A subscriber that read the record at
+  that moment raced with the write. The own-sale step now reads its own
+  copy from the store, decides on that, and publishes it. `Book` and
+  `AddSegment` return the decided copy. A test with a bus listener fails
+  under the race detector on the old code.
+
+## v0.1.101 — A class sold past its limit stays closed
+- `pkg/inventory` counted the seats a class may still sell as its
+  authorisation less what was sold in it and below it. The controller
+  sets the authorisations again at every question. When a forecast
+  strengthened, a class's authorisation fell under what the class had
+  sold, the count went negative, and the callers read a negative count
+  as "no ladder". The class then sold to the last seat of the cabin and
+  was advertised as open. The count now stops at zero. wholesky found
+  it: a carrier's lowest class had closed, a sale in the class above
+  moved the limit down by 2, and the next request was confirmed.
+
+## v0.1.100 — A carrier's node sells its own seats
+- A node with a carrier's identity and a `Responder` could answer other
+  systems' requests and could not sell for itself. A booking of its own
+  flight made on the node, from its console, its API or an NDC order,
+  wrote the record, found no link to itself, and left the segment at
+  `HN` for ever. The node now decides its own carrier's segments from
+  its own inventory when the booking is made, with a nil peer and no
+  message. `Gateway.Own` reports whether a carrier's seats are the
+  node's own.
+- A cancellation of an own segment releases the seat through the
+  `Releaser` and counts no carrier as unreachable. Ticketing, documents
+  and a division send nothing to the node's own carrier and queue no
+  divergence for it. An added segment on the node's own carrier is
+  decided the same way.
+- Segments of other carriers on the same record are requested over
+  their links as before. A node with no `Responder` is unchanged.
+
+## v0.1.99 — An NDC order is a sale in the NDC channel
+- An order created over `POST /ndc` now carries the channel `ndc` on its
+  booking request, so the record's origin names it and a fare filed for
+  NDC sellers can be priced for the order. Before, the channel was
+  empty, and a fare restricted to that channel could not be sold through
+  it.
+
+## v0.1.98 — A booking that carries its seller's quote
+- `gateway.BookingRequest.Quote` is the fare as the seller's own engine
+  priced it. A node with `Gateway.AcceptQuotes` set stores it on the
+  record and does not price again, after it checks that the quote covers
+  the booking's passengers and air segments in the classes booked. This
+  is how a booking made from a shopping engine's answer keeps the price
+  the traveller was shown. A node that does not accept quotes ignores
+  the field and prices the booking itself, as before.
+- An ingress test no longer dials a probe connection at a listener whose
+  `max_connections` is 2. The probe held one of the 2 places, and the
+  test failed about once in 150 runs under the race detector.
+
+## v0.1.97 — Fare components and priceable units, the point of sale, minimum connecting times
+- `pkg/fare` prices an itinerary the way a fare engine does. A fare pays
+  for one or more consecutive flights (a fare component). Components
+  are grouped into priceable units: one way, round trip, open jaw,
+  circle trip. `Price` searches every division of the itinerary and
+  returns the cheapest whose fares all pass their rules. Before, each
+  segment was priced alone under its own market's fare, so a connection
+  cost the sum of two local fares and no rule reached past its segment.
+  The model is Carl de Marcken's "Computational Complexity of Air Travel
+  Planning" (ITA Software, 2003), and the tests price that paper's
+  examples: the $2,000 and $1,800 ways to pay for the same three
+  flights, the H14ESNR fare with its days, routing, surcharges and
+  combinations, and the four flights that sell as two open jaws when
+  the circle trip fails its advance purchase.
+- Rules by ATPCO category: day and time (2), season (3) and blackouts
+  (11), flight application with partner carriers and their booking
+  classes (4), advance purchase measured to the first flight of the
+  priceable unit (5), minimum and maximum stay and the Saturday night
+  (6, 7), stopovers by the length of the wait (8, 9), combinations
+  (10), surcharges (12), sales restrictions by country, channel, agency
+  and account (15, 35) and penalties (16). A routing names the points a
+  fare may connect at. A fare is good in both directions unless it is
+  `Directional`, and a `RoundTrip` fare may not be sold one way.
+- `Request.Open` turns the pricing into a lowest-fare search: it chooses
+  each segment's class from the ones that can be sold. `Request.Sale` is
+  the point of sale. The quote carries its fare components, its
+  priceable units and the fare calculation line a ticket prints.
+- A through fare is divided between its segments by their miles. A tax
+  marked `CarrierImposed` (YQ, YR) is totalled apart, because it is the
+  carrier's revenue. A tariff that implements `Taxer` gives the taxes
+  for an itinerary and not only for a carrier.
+- `gateway.BookingRequest` gains `Country`, `Account` and `PricedAt`.
+  The record's origin keeps the point of sale, the pricing is for it,
+  and a quote made earlier is honoured for `Gateway.QuoteValidity`.
+  `pnr.Pricing` keeps the fare calculation, the fare components and the
+  carrier-imposed fees. `Gateway.Miles` supplies sector mileage.
+- `inventory.Controller.Value` is the carrier's own estimate of what a
+  request brings it, net of what the channel costs. A request for one
+  leg is nested in the class its net value covers. A seat therefore
+  stays on sale in the carrier's own channel after it closes in a
+  dearer one.
+- `pkg/mct` is new: minimum connecting times to IATA's SSIM chapter 8
+  (March 2021), which IATA publishes free. It reads and writes the
+  200-byte transmission file, holds station standards, exceptions and
+  suppressions, and answers for a connection by the chapter's hierarchy
+  of 31 data elements, its codeshare rules, its global defaults and the
+  connection-building filter. The tests use the chapter's sample
+  records and its worked examples. The fuzzer found that a record with
+  an invalid status was written and then refused on reading.
+- `prorate.Divide` values each coupon of a fare component under the
+  terms two carriers have agreed: a fixed amount, a share of the fare
+  or of the local fare, a floor or a ceiling, and a service charge or
+  codeshare commission. Coupons without terms share the rest by
+  straight rate. `Coupon` gains `Local`, so a literal without field
+  names no longer compiles.
+
 ## v0.1.96 — A crew member's history, cabin crew, and what a duty pays
 - `crew.History` is a crew member's past as a tracking store holds it:
   block time and flight duty time inside a window, the last duty, and

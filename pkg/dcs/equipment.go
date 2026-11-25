@@ -21,9 +21,10 @@ type EquipmentChange struct {
 // change an ASM EQT announces, and the story behind an AOG. The cabin is
 // rebuilt from the new type. Every accepted or boarded passenger keeps their
 // seat if the new cabin has it in the same compartment, is re-seated in
-// their compartment if it does not, and goes to standby -- involuntarily
-// denied boarding, with an alert a supervisor sees -- when the new cabin has
-// no seat left for them. Boarded passengers are seated first, then accepted
+// their compartment if it does not, and waits for a seat with a claim to
+// one (see oversale.go), with an alert a supervisor sees, when the new
+// cabin has no seat left for them. One who still waits when the flight
+// closes is denied boarding. Boarded passengers are seated first, then accepted
 // ones in sequence order, so the aircraft's own order of arrival decides who
 // is displaced. A closed flight cannot change aircraft.
 func (s *Station) ChangeEquipment(ctx context.Context, k Key, eq Equipment) (*EquipmentChange, error) {
@@ -91,7 +92,14 @@ func (s *Station) ChangeEquipment(ctx context.Context, k Key, eq Equipment) (*Eq
 		}
 		if err != nil || len(seats) == 0 {
 			p.Seat = ""
-			p.Status = StatusStandby
+			f.wait(p, OversaleEquipment, now)
+			ch.Displaced = append(ch.Displaced, p)
+			continue
+		}
+		// The seat is taken now, so the next passenger is not given it.
+		if err := f.Cabin.Take(seats[0], p.ID); err != nil {
+			p.Seat = ""
+			f.wait(p, OversaleEquipment, now)
 			ch.Displaced = append(ch.Displaced, p)
 			continue
 		}

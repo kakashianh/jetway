@@ -14,9 +14,10 @@
 // cabin draws on the same pool. Booking classes map to compartments the
 // way the departure control system maps them (F, A, P, R to first; J, C, D,
 // I, Z to business; the rest to economy), falling back to the cabins the
-// aircraft actually has. Nested authorisation levels per class -- the yield
-// management a real inventory layers on top -- are not modelled: this is
-// the physical inventory, and a class is open while its cabin has a seat.
+// aircraft actually has. Revenue management's controls are the caller's:
+// Levels is the nested authorisation by class, and Authorized the cabin's
+// overbooking limit. Without them this is the physical inventory, and a
+// class is open while its cabin has a seat.
 //
 // The count is rebuilt from the book of record, not remembered: Seed adds
 // what a stored record holds, and a carrier restarting rebuilds the day
@@ -77,6 +78,13 @@ type Inventory struct {
 	// Levels, when set, is the class ladder revenue management publishes
 	// per cabin; nil sells every class to the last seat.
 	Levels Levels
+	// Authorized, when set, is the cabin's authorised capacity: how many
+	// confirmed seats revenue management lets it hold. Over the seats is
+	// overbooking, set against the passengers who will not come (see
+	// overbook.go). Under them holds seats back. Nil sells the seats the
+	// cabin has. A cabin sold past its seats is the departure control
+	// system's to resolve at the airport.
+	Authorized func(carrier, flightNum, wireDate, board, compartment string, seats int) int
 	// Network, when set, adds bid-price control over the ladders: a record
 	// asking for two or more of this carrier's legs at once is accepted
 	// only when its fare for them covers the sum of the legs' bid prices
@@ -153,6 +161,21 @@ func (inv *Inventory) cabin(carrier, flight, date, board, class string) (key, co
 	return poolKey(carrier, flight, date, board, comp), comp, comps[comp], true
 }
 
+// limitFor asks revenue management for the authorised capacity of the
+// cabin a class sells from. Like ladderFor it is called before the
+// inventory's lock is taken. ok is false for a flight the carrier does not
+// operate.
+func (inv *Inventory) limitFor(carrier, flight, date, board, class string) (limit int, ok bool) {
+	_, comp, seats, ok := inv.cabin(carrier, flight, date, board, class)
+	if !ok {
+		return 0, false
+	}
+	if inv.Authorized == nil {
+		return seats, true
+	}
+	return max(inv.Authorized(carrier, flight, date, board, comp, seats), 0), true
+}
+
 // ladderFor asks revenue management for a cabin's ladder. It is called
 // before the inventory's lock is taken, never under it: a forecaster is
 // entitled to ask the inventory what it has sold (SoldByClass), and did,
@@ -170,9 +193,15 @@ func (inv *Inventory) ladderFor(carrier, flight, date, board, class string) []Le
 
 // classOpen reports how many seats the class may still sell under the
 // ladder: its authorisation less what is sold in it and every class below
-// it. Without a ladder, or for a class not on it, the cabin's own count
-// decides and this returns -1. The ladder comes from ladderFor, asked
-// before the lock.
+// it, and never less than none. Without a ladder, or for a class not on
+// it, the cabin's own count decides and this returns -1. The ladder comes
+// from ladderFor, asked before the lock.
+//
+// The floor matters. The ladder is set again at every question, and a
+// forecast that strengthens puts a class's authorisation under what the
+// class has already sold. A negative answer here read as "no ladder" to
+// the callers, and a class sold past its limit sold on to the last seat
+// of the cabin.
 func (inv *Inventory) classOpen(ladder []Level, carrier, flight, date, board, comp, class string) int {
 	if len(ladder) == 0 {
 		return -1
@@ -191,13 +220,14 @@ func (inv *Inventory) classOpen(ladder []Level, carrier, flight, date, board, co
 	for _, l := range ladder[at:] {
 		below += inv.soldClass[key+"/"+strings.ToUpper(l.Class)]
 	}
-	return ladder[at].Authorized - below
+	return max(0, ladder[at].Authorized-below)
 }
 
 // Decide implements gateway.Responder: a status per segment awaiting one.
 func (inv *Inventory) Decide(ctx context.Context, p *pnr.PNR, peer *gateway.Peer) (map[string]string, error) {
 	// Revenue management's ladders first, outside the lock (see ladderFor).
 	ladders := map[string][]Level{}
+	limits := map[string]int{}
 	fares := map[string]map[string]float64{}
 	netBids := map[string]float64{}
 	var asked []*pnr.Segment
@@ -205,6 +235,9 @@ func (inv *Inventory) Decide(ctx context.Context, p *pnr.PNR, peer *gateway.Peer
 		s := &p.Segments[i]
 		if s.Type == pnr.SegmentAir && awaitingDecision(s.Status) && (inv.Carrier == "" || s.Carrier == inv.Carrier) {
 			ladders[s.Key()] = inv.ladderFor(s.Carrier, s.FlightNum, s.WireDate, s.Board, s.Class)
+			if l, ok := inv.limitFor(s.Carrier, s.FlightNum, s.WireDate, s.Board, s.Class); ok {
+				limits[s.Key()] = l
+			}
 			asked = append(asked, s)
 			if inv.Network != nil {
 				if _, comp, _, ok := inv.cabin(s.Carrier, s.FlightNum, s.WireDate, s.Board, s.Class); ok {
@@ -219,14 +252,35 @@ func (inv *Inventory) Decide(ctx context.Context, p *pnr.PNR, peer *gateway.Peer
 			}
 		}
 	}
+	// What the request is worth to the carrier, by its own estimate when it
+	// has one, else by the record's price.
+	var worth float64
+	valued, own := false, false
+	if inv.Network != nil && len(asked) > 0 {
+		if inv.Network.Value != nil {
+			worth, valued = inv.Network.Value(p, asked, peer)
+			own = valued
+		}
+		if !valued {
+			worth, valued = itineraryFare(p, asked)
+		}
+	}
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	out := map[string]string{}
+	// A single leg valued by the carrier is nested by its value: the class
+	// asked for, or a lower one when the value does not cover that class's
+	// fare.
+	nestAs := map[string]string{}
+	if own && len(asked) == 1 {
+		s := asked[0]
+		nestAs[s.Key()] = netClass(ladders[s.Key()], fares[s.Key()], s.Class, worth/float64(max(s.Seats, 1)))
+	}
 	// Bid-price control for a connecting itinerary: the record's fare for
 	// this carrier's legs must cover what the legs' last seats are worth.
 	displaced := false
 	if inv.Network != nil && len(asked) >= 2 {
-		if fare, ok := itineraryFare(p, asked); ok {
+		if fare, ok := worth, valued; ok {
 			var bid float64
 			for _, s := range asked {
 				key, comp, _, ok := inv.cabin(s.Carrier, s.FlightNum, s.WireDate, s.Board, s.Class)
@@ -271,17 +325,27 @@ func (inv *Inventory) Decide(ctx context.Context, p *pnr.PNR, peer *gateway.Peer
 			out[s.Key()] = "UN"
 			continue
 		}
+		// The cabin sells to its authorised capacity, which is its seats
+		// unless revenue management overbooks it.
+		limit := seats
+		if l, ok := limits[s.Key()]; ok {
+			limit = l
+		}
 		// The class ladder closes a class before the cabin is full: a
 		// closed class is unable, not waitlisted, because the seats exist
 		// and are being held for a higher fare.
-		if inv.sold[key]+s.Seats <= seats {
-			if open := inv.classOpen(ladders[s.Key()], s.Carrier, s.FlightNum, s.WireDate, s.Board, comp, s.Class); open >= 0 && s.Seats > open {
+		if inv.sold[key]+s.Seats <= limit {
+			class := s.Class
+			if as, ok := nestAs[s.Key()]; ok {
+				class = as
+			}
+			if open := inv.classOpen(ladders[s.Key()], s.Carrier, s.FlightNum, s.WireDate, s.Board, comp, class); open >= 0 && s.Seats > open {
 				out[s.Key()] = "UC"
 				continue
 			}
 		}
 		switch {
-		case inv.sold[key]+s.Seats <= seats:
+		case inv.sold[key]+s.Seats <= limit:
 			inv.sold[key] += s.Seats
 			inv.addClass(key, strings.ToUpper(s.Class), s.Seats)
 			out[s.Key()] = "KK"
@@ -411,10 +475,15 @@ func (inv *Inventory) addClass(pool, class string, delta int) {
 }
 
 // SetOverride forces the outcome for one class on one flight and date, the
-// way a demo shows a refusal or a waitlist on demand.
+// way a demo shows a refusal or a waitlist on demand. An empty status
+// takes the override off and gives the class back to the ladder.
 func (inv *Inventory) SetOverride(carrier, flight, wireDate, board, class, status string) {
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
+	if status == "" {
+		delete(inv.overrides, classKey(carrier, flight, wireDate, board, class))
+		return
+	}
 	inv.overrides[classKey(carrier, flight, wireDate, board, class)] = status
 }
 
@@ -422,8 +491,13 @@ func (inv *Inventory) SetOverride(carrier, flight, wireDate, board, class, statu
 // in the class's cabin, and open, waitlist or closed accordingly.
 func (inv *Inventory) Availability(keys []avail.Key, asOf time.Time) []avail.Entry {
 	ladders := make([][]Level, len(keys))
+	limits := make([]int, len(keys))
 	for i, k := range keys {
 		ladders[i] = inv.ladderFor(k.Carrier, k.FlightNum, availWire(k), k.Board, k.Class)
+		limits[i] = -1
+		if l, ok := inv.limitFor(k.Carrier, k.FlightNum, availWire(k), k.Board, k.Class); ok {
+			limits[i] = l
+		}
 	}
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
@@ -460,7 +534,11 @@ func (inv *Inventory) Availability(keys []avail.Key, asOf time.Time) []avail.Ent
 			// rather than advertise a seat on it.
 			continue
 		}
-		left := seats - inv.sold[key]
+		limit := seats
+		if limits[i] >= 0 {
+			limit = limits[i]
+		}
+		left := limit - inv.sold[key]
 		if open := inv.classOpen(ladders[i], k.Carrier, k.FlightNum, wire, k.Board, comp, k.Class); open >= 0 && open < left {
 			left = open
 			if left <= 0 {
@@ -485,14 +563,32 @@ func (inv *Inventory) Availability(keys []avail.Key, asOf time.Time) []avail.Ent
 	return out
 }
 
-// Pool is one cabin's count, for the console.
+// Pool is one cabin's count, for the console. Authorized is the cabin's
+// authorised capacity, which is Seats unless revenue management set
+// another.
 type Pool struct {
 	Flight, Date, Board, Compartment string
 	Seats, Sold, Waitlisted          int
+	Authorized                       int
+
+	carrier, number string
 }
 
 // Snapshot lists every cabin with anything sold or waitlisted.
 func (inv *Inventory) Snapshot() []Pool {
+	out := inv.snapshot()
+	// Revenue management is asked outside the lock, as for a decision.
+	for i := range out {
+		p := &out[i]
+		p.Authorized = p.Seats
+		if inv.Authorized != nil && p.Seats > 0 {
+			p.Authorized = max(inv.Authorized(p.carrier, p.number, p.Date, p.Board, p.Compartment, p.Seats), 0)
+		}
+	}
+	return out
+}
+
+func (inv *Inventory) snapshot() []Pool {
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	seen := map[string]bool{}
@@ -506,7 +602,8 @@ func (inv *Inventory) Snapshot() []Pool {
 		if len(parts) != 5 {
 			return
 		}
-		p := Pool{Flight: parts[0] + parts[1], Date: parts[2], Board: parts[3], Compartment: parts[4], Sold: inv.sold[key], Waitlisted: inv.waitlisted[key]}
+		p := Pool{Flight: parts[0] + parts[1], Date: parts[2], Board: parts[3], Compartment: parts[4], Sold: inv.sold[key], Waitlisted: inv.waitlisted[key],
+			carrier: parts[0], number: parts[1]}
 		if inv.Capacity != nil {
 			if comps, ok := inv.Capacity(parts[0], parts[1], parts[2], parts[3]); ok {
 				p.Seats = comps[parts[4]]

@@ -11,7 +11,7 @@ import (
 
 // Departure control over HTTP: the departures board, one flight's manifest
 // and seat map, and the agent operations -- accept, go-show, board, offload,
-// close check-in, close the flight. The console's Departures view is built
+// volunteer, close check-in, close the flight. The console's Departures view is built
 // on these; so could a kiosk or a gate reader be.
 
 // dcsRoutes mounts the departure control endpoints. They answer 404 with a
@@ -24,6 +24,7 @@ func (s *Server) dcsRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/dcs/flight/{flight}/{date}/goshow", s.dcsGoShow)
 	mux.HandleFunc("POST /api/dcs/flight/{flight}/{date}/board", s.dcsBoard)
 	mux.HandleFunc("POST /api/dcs/flight/{flight}/{date}/offload", s.dcsOffload)
+	mux.HandleFunc("POST /api/dcs/flight/{flight}/{date}/volunteer", s.dcsVolunteer)
 	mux.HandleFunc("POST /api/dcs/flight/{flight}/{date}/close-checkin", s.dcsCloseCheckIn)
 	mux.HandleFunc("POST /api/dcs/flight/{flight}/{date}/close", s.dcsClose)
 }
@@ -103,7 +104,8 @@ func dcsError(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, dcs.ErrFlightClosed), errors.Is(err, dcs.ErrCheckInClosed), errors.Is(err, dcs.ErrCheckInOpen),
 		errors.Is(err, dcs.ErrAlreadyAccepted), errors.Is(err, dcs.ErrNotAccepted), errors.Is(err, dcs.ErrAlreadyBoarded),
-		errors.Is(err, dcs.ErrSeatTaken), errors.Is(err, dcs.ErrNoSeat), errors.Is(err, dcs.ErrListAfterAccept):
+		errors.Is(err, dcs.ErrSeatTaken), errors.Is(err, dcs.ErrNoSeat), errors.Is(err, dcs.ErrListAfterAccept),
+		errors.Is(err, dcs.ErrNotOversold), errors.Is(err, dcs.ErrLapInfant):
 		http.Error(w, err.Error(), http.StatusConflict)
 	default:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -197,6 +199,34 @@ func (s *Server) dcsOffload(w http.ResponseWriter, r *http.Request) {
 		s.OnOffload(r.Context(), f, p)
 	}
 	writeJSON(w, http.StatusOK, p)
+}
+
+// dcsVolunteer records that a seated passenger gives up the seat on a
+// flight where passengers wait for seats. The seat goes to the passenger
+// who has waited longest. The volunteer's bags come off, and the seated
+// passenger's bags are announced, the way an offload and an acceptance do.
+func (s *Server) dcsVolunteer(w http.ResponseWriter, r *http.Request) {
+	f, ok := s.dcsFind(w, r)
+	if !ok {
+		return
+	}
+	var a passengerAction
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&a); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	v, err := s.Ground.Volunteer(r.Context(), f.Key, a.PassengerID)
+	if err != nil {
+		dcsError(w, err)
+		return
+	}
+	if s.OnOffload != nil {
+		s.OnOffload(r.Context(), v.Flight, v.Volunteer)
+	}
+	if s.OnAccept != nil && v.Seated != nil && len(v.Seated.Bags) > 0 {
+		s.OnAccept(r.Context(), &dcs.Acceptance{Flight: v.Flight, Passengers: []*dcs.Passenger{v.Seated}, Tags: v.Seated.Bags})
+	}
+	writeJSON(w, http.StatusOK, v)
 }
 
 func (s *Server) dcsCloseCheckIn(w http.ResponseWriter, r *http.Request) {

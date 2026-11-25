@@ -3,6 +3,9 @@ package inventory
 import (
 	"math"
 	"sort"
+
+	"github.com/adamf/jetway/pkg/gateway"
+	"github.com/adamf/jetway/pkg/pnr"
 )
 
 // ClassDemand is one booking class's forecast for a cabin: the fare it
@@ -97,12 +100,31 @@ type Forecast func(carrier, flightNum, wireDate, board, compartment string, seat
 type Controller struct {
 	Capacity Capacity
 	Forecast Forecast
+	// Authorized, when set, is the cabin's authorised capacity, as the
+	// inventory's field of the same name is: the ladder is then nested
+	// under the bookings the cabin may hold and not under its seats. The
+	// forecaster is still told the seats.
+	Authorized func(carrier, flightNum, wireDate, board, compartment string, seats int) int
 	// BidPrice, when set, values a cabin's marginal seat for network
 	// control in place of the ladder's displacement cost: the caller's
 	// network programme (NetworkBidPrices) supplies the leg duals, and
 	// the additive ladder heuristic is the fallback whenever it answers
 	// false. It is consulted before the inventory lock is taken.
 	BidPrice func(carrier, flightNum, wireDate, board, compartment string) (float64, bool)
+	// Value, when set, is what the carrier expects a request to bring it
+	// for the segments asked, across the party: the fare for that origin,
+	// destination and class at the seller's point of sale, less what the
+	// channel that asked costs -- a distribution system's booking fee, a
+	// commission. A carrier's inventory is asked over links that carry no
+	// price, so the value is the carrier's own estimate from its own
+	// filing; the record's pricing is used when Value is unset or answers
+	// false. A request for one leg is then nested by its value: one worth
+	// less than its class's fare is sold only while the class its value
+	// does cover is open, which is how a seat stays on sale in the
+	// carrier's own channel after it has closed in a dearer one. It is
+	// called before the inventory lock is taken. The peer is the link the
+	// request arrived on, nil for the carrier's own sales.
+	Value func(p *pnr.PNR, asked []*pnr.Segment, peer *gateway.Peer) (float64, bool)
 }
 
 // Levels is the ladder for a cabin now, or nil when the flight or the
@@ -119,5 +141,14 @@ func (c *Controller) Levels(carrier, flightNum, wireDate, board, compartment str
 	if !ok || seats <= 0 {
 		return nil
 	}
-	return EMSRb(seats, c.Forecast(carrier, flightNum, wireDate, board, compartment, seats))
+	return EMSRb(c.limit(carrier, flightNum, wireDate, board, compartment, seats), c.Forecast(carrier, flightNum, wireDate, board, compartment, seats))
+}
+
+// limit is the bookings a cabin may hold: its seats, or what revenue
+// management authorised.
+func (c *Controller) limit(carrier, flightNum, wireDate, board, compartment string, seats int) int {
+	if c.Authorized == nil {
+		return seats
+	}
+	return max(c.Authorized(carrier, flightNum, wireDate, board, compartment, seats), 0)
 }

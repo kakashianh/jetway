@@ -84,6 +84,24 @@ const (
 	StatusOffloaded Status = "offloaded"
 	// StatusDeleted was removed from the list by an ADL before acceptance.
 	StatusDeleted Status = "deleted"
+	// StatusDenied came for the flight with a claim to a seat and did not
+	// fly, because the cabin had no seat or because they gave theirs up
+	// for the carrier's offer: denied boarding. It is not a no-show. The
+	// passenger came.
+	StatusDenied Status = "denied"
+)
+
+// Oversale is why a passenger with a claim to a seat waits for one or was
+// denied boarding.
+type Oversale string
+
+const (
+	// OversaleSold is more passengers with confirmed bookings at the
+	// airport than the cabin has seats: the cabin was overbooked.
+	OversaleSold Oversale = "oversold"
+	// OversaleEquipment is a smaller aircraft taking the flight after the
+	// passenger was accepted.
+	OversaleEquipment Oversale = "equipment"
 )
 
 // Category is how the final sales message classifies a passenger relative to
@@ -98,7 +116,8 @@ const (
 	CategoryNoRec Category = "NOREC"
 	// CategoryIDPad is staff travel accepted from standby.
 	CategoryIDPad Category = "IDPAD"
-	// CategoryInvol was denied boarding involuntarily: oversold.
+	// CategoryInvol was denied boarding involuntarily: the passenger came
+	// with a claim to a seat and the cabin had none.
 	CategoryInvol Category = "INVOL"
 )
 
@@ -191,7 +210,27 @@ type Passenger struct {
 	DeletedAfterAcceptance bool `json:"deleted_after_acceptance,omitempty"`
 	// OffloadReason says why an offloaded passenger came off.
 	OffloadReason string `json:"offload_reason,omitempty"`
+
+	// Oversale is set while a passenger with a claim to a seat waits for
+	// one, and stays on a passenger who was denied boarding as the cause.
+	// A passenger who waits has StatusStandby and stands ahead of every
+	// other standby.
+	Oversale Oversale `json:"oversale,omitempty"`
+	// WaitingSince is when a passenger with a claim began to wait. The
+	// one who has waited longest is seated first.
+	WaitingSince *time.Time `json:"waiting_since,omitempty"`
+	// HeldBags are the weights of the bags a waiting passenger brought,
+	// in kilos. They are tagged when the passenger is seated.
+	HeldBags []int `json:"held_bags,omitempty"`
+	// Volunteer marks a denied boarding the passenger agreed to: they
+	// gave up a seat for the carrier's offer.
+	Volunteer bool `json:"volunteer,omitempty"`
 }
+
+// Claimant reports whether the passenger waits for a seat they have a
+// claim to: a confirmed booking the cabin had no seat for, or a seat an
+// aircraft change took away.
+func (p *Passenger) Claimant() bool { return p.Status == StatusStandby && p.Oversale != "" }
 
 // Display renders the passenger as the wire does: 1SMITH/JOHNMR.
 func (p *Passenger) Display() string { return p.Surname + "/" + p.Given }
@@ -205,7 +244,7 @@ func (p *Passenger) Flying() bool {
 // the list or through it, not removed.
 func (p *Passenger) Active() bool {
 	switch p.Status {
-	case StatusDeleted, StatusOffloaded, StatusNoShow:
+	case StatusDeleted, StatusOffloaded, StatusNoShow, StatusDenied:
 		return false
 	}
 	return true
@@ -282,9 +321,16 @@ type Counts struct {
 	Standby  int `json:"standby"`
 	NoShow   int `json:"noshow"`
 	Offload  int `json:"offloaded"`
-	Bags     int `json:"bags"`
-	BagKilos int `json:"bag_kilos"`
-	Seats    int `json:"seats"`
+	// Waiting is the standbys with a claim to a seat. Denied is the
+	// passengers denied boarding, and Volunteers those of them who agreed.
+	// An infant on a lap is in none of the 3: it waits and comes off with
+	// its adults, and holds no seat.
+	Waiting    int `json:"waiting,omitempty"`
+	Denied     int `json:"denied,omitempty"`
+	Volunteers int `json:"volunteers,omitempty"`
+	Bags       int `json:"bags"`
+	BagKilos   int `json:"bag_kilos"`
+	Seats      int `json:"seats"`
 }
 
 // Counts summarises the manifest.
@@ -300,6 +346,17 @@ func (f *Flight) Counts() Counts {
 			c.Boarded++
 		case StatusStandby:
 			c.Standby++
+			if p.Oversale != "" && p.Type != PaxInfant {
+				c.Waiting++
+			}
+		case StatusDenied:
+			if p.Type == PaxInfant {
+				break
+			}
+			c.Denied++
+			if p.Volunteer {
+				c.Volunteers++
+			}
 		case StatusNoShow:
 			c.NoShow++
 		case StatusOffloaded:
